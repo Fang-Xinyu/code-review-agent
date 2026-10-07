@@ -1,5 +1,7 @@
 # TraceReview
 
+项目仓库：[Fang-Xinyu/code-review-agent](https://github.com/Fang-Xinyu/code-review-agent)
+
 TraceReview 是一个面向课程项目的 **Python 代码审查 Agent**。它审查单个 Python 文件，用每次必跑的 AST/Ruff 事实作为基线，让 LangGraph Agent 在有界循环中自主追加取证，再由程序验证源码引用和工具来源。高/中风险或证据质量不足的候选会选择性复核。
 
 该实现对应课程要求的可观察状态图、确定性静态检查、证据落地、三级确认状态、追问、局部补丁、导出与离线测试。
@@ -46,8 +48,10 @@ python -m review_agent review examples/buggy_basic.py --format json --output rep
 
 ```bash
 pytest
-python scripts/package_submission.py --output dist/trace-review-agent.zip
+python scripts/package_submission.py
 ```
+
+默认在项目文件夹旁生成同名压缩包 `trace-review-agent.zip`，与 `trace-review-agent/` 并列；终端会打印完整保存路径。可使用 `--output` 指定其他路径，相对路径以项目目录为基准。
 
 测试使用脚本化假模型，不访问网络，用于验证程序流程和边界处理，不代表在线 AI 审查效果。
 

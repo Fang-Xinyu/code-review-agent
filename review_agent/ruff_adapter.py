@@ -76,7 +76,7 @@ def run_ruff(code: str, filename: str = "input.py", timeout: float = 11.0) -> tu
         return [], ToolStatus(name="ruff", status="unavailable", detail="Ruff 可执行文件和 Python 模块均不可用")
     command.extend(["check", "--isolated", "--no-cache", "--select", "F,E9", "--output-format", "json", "--stdin-filename", filename, "-"])
     try:
-        result = subprocess.run(command, input=code, text=True, capture_output=True, shell=False, timeout=timeout, check=False)
+        result = subprocess.run(command, input=code, text=True, encoding="utf-8", capture_output=True, shell=False, timeout=timeout, check=False)
     except FileNotFoundError:
         return [], ToolStatus(name="ruff", status="unavailable", detail="Ruff 可执行文件不可用")
     except subprocess.TimeoutExpired:

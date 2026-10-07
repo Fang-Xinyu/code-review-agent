@@ -35,11 +35,12 @@ def package(root: Path, output: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", default="dist/trace-review-agent.zip")
+    parser.add_argument("--output", help="输出路径；默认在项目文件夹旁生成同名 ZIP，相对路径以项目目录为基准")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    count = package(root, (root / args.output).resolve())
-    print(f"Packaged {count} files.")
+    output = (root / args.output).resolve() if args.output else root.parent / f"{root.name}.zip"
+    count = package(root, output)
+    print(f"Packaged {count} files.\nSaved to: {output}")
     return 0
 
 

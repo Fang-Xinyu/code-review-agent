@@ -31,6 +31,7 @@ def test_ruff_completed(mock_run):
     findings, status = run_ruff("x\n")
     assert status.status == "completed" and len(findings) == 1
     assert mock_run.call_args.kwargs["shell"] is False
+    assert mock_run.call_args.kwargs["encoding"] == "utf-8"
 
 
 @patch("review_agent.ruff_adapter.subprocess.run", side_effect=FileNotFoundError)
