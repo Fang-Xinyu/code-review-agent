@@ -1,8 +1,3 @@
-"""
-订单金额使用整数分；discount_percent 表示百分比折扣。
-此文件刻意保留待审查问题，不用于真实订单处理。
-"""
-
 import csv
 import json
 from dataclasses import dataclass

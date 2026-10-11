@@ -7,14 +7,16 @@ from pathlib import Path
 from queue import Empty, Queue
 
 import streamlit as st
+from pydantic import ValidationError
 
 from review_agent.config import MAX_SOURCE_BYTES, MAX_SOURCE_LINES, ModelConfig
 from review_agent.graph import ReviewAgent
-from review_agent.llm import DeepSeekModel, parse_json_object, test_connection
+from review_agent.llm import DeepSeekModel, RecordingModel, parse_json_object, test_connection
+from review_agent.models import FollowupResponse, ReviewReport
 from review_agent.patches import generate_patch
 from review_agent.prompts import FOLLOWUP_SYSTEM
 from review_agent.reporting import report_json, report_markdown, snapshot_is_stale
-from review_agent.ui_text import ACTIONS, ORIGINS, STAGES, TOOL_STATUSES, escape_markdown_tildes, finding_basis
+from review_agent.ui_text import ACTIONS, CONFIRMATIONS, ORIGINS, STAGES, STOP_REASONS, TOOL_STATUSES, escape_markdown_tildes, finding_basis
 from review_agent.verification import normalize_and_validate
 
 
@@ -86,10 +88,21 @@ st.caption("Python 代码审查 Agent")
 
 def init_state() -> None:
     defaults = {"source": EXAMPLES["buggy_basic.py"].read_text(encoding="utf-8"), "filename": "buggy_basic.py",
-                "report": None, "chat": [], "patch": None, "patch_hash": None}
+                "report": None, "chat": [], "patch": None, "patch_hash": None, "interaction_usage": None}
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    previous_report = st.session_state.report
+    if previous_report is not None and not isinstance(previous_report, ReviewReport):
+        try:
+            # Streamlit can keep instances created before a source-code reload.
+            st.session_state.report = ReviewReport.model_validate(previous_report.model_dump())
+        except (ValidationError, ValueError, AttributeError):
+            st.session_state.report = None
+            st.session_state.patch = None
+            st.session_state.patch_hash = None
+            st.session_state.chat = []
+            st.warning("旧报告无法与当前版本兼容，请重新审查。")
 
 
 def config_from_sidebar() -> ModelConfig:
@@ -110,8 +123,14 @@ def config_from_sidebar() -> ModelConfig:
 init_state()
 config = config_from_sidebar()
 
+
+def remember_interaction_usage(model, label):
+    if model is not None:
+        st.session_state.interaction_usage = {"label": label, **model.totals(),
+            "model_call_limit": model.max_calls, "calls": [call.model_dump() for call in model.calls]}
+
 st.subheader("1. 输入代码")
-st.caption(f"请选择一种输入方式，最多审查 {MAX_SOURCE_LINES} 行、2 MiB UTF-8 Python 代码。")
+st.caption(f"请选择一种输入方式，最多审查 {MAX_SOURCE_LINES} 行、100 KB（102400 字节） UTF-8 Python 代码。")
 input_method = st.radio(
     "代码来源",
     ["内置示例", "上传代码", "直接复制粘贴"],
@@ -132,7 +151,7 @@ if input_method == "内置示例":
         st.rerun()
 
 elif input_method == "上传代码":
-    st.caption("请选择或拖放一个不超过 2 MiB、UTF-8 编码的 .py 文件。")
+    st.caption("请选择或拖放一个不超过 100 KB（102400 字节）、UTF-8 编码的 .py 文件。")
     upload = st.file_uploader("Python 代码文件", type=["py"], label_visibility="collapsed")
     if upload is not None:
         uploaded_source = None
@@ -142,7 +161,7 @@ elif input_method == "上传代码":
             uploaded_bytes = upload.getvalue()
             uploaded_lines = 0
             if len(uploaded_bytes) > MAX_SOURCE_BYTES:
-                upload_error = f"该文件的 UTF-8 大小超过 2 MiB 上限，无法载入审查。"
+                upload_error = "该文件的 UTF-8 大小超过 100 KB（102400 字节）上限，无法载入审查。"
             else:
                 uploaded_source = uploaded_bytes.decode("utf-8")
                 uploaded_lines = len(uploaded_source.replace("\r\n", "\n").replace("\r", "\n").splitlines())
@@ -177,8 +196,8 @@ st.markdown("#### 代码预览与编辑")
 filename = st.text_input("文件名", key="filename", help="文件名必须以 .py 结尾")
 source = st.text_area("Python 代码", key="source", height=420)
 source_lines = len(source.replace("\r\n", "\n").replace("\r", "\n").splitlines())
-source_bytes = len(source.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8"))
-st.caption(f"当前 {source_lines} / {MAX_SOURCE_LINES} 行 · UTF-8 {source_bytes / 1024 / 1024:.2f} / 2.00 MiB")
+source_bytes = len(source.encode("utf-8"))
+st.caption(f"当前 {source_lines} / {MAX_SOURCE_LINES} 行 · UTF-8 {source_bytes / 1024:.2f} / {MAX_SOURCE_BYTES / 1024:.0f} KB")
 try:
     _, st.session_state.current_hash = normalize_and_validate(source, filename)
     input_error = None
@@ -192,6 +211,11 @@ st.subheader("2. 审查设置")
 focus = st.text_input("审查重点", "全面检查正确性、异常处理、资源和安全")
 review_disabled = not bool(config.api_key) or st.session_state.current_hash is None
 if st.button("开始审查", type="primary", disabled=review_disabled):
+    st.session_state.report = None
+    st.session_state.chat = []
+    st.session_state.patch = None
+    st.session_state.patch_hash = None
+    st.session_state.interaction_usage = None
     try:
         with st.spinner("正在审查代码…"):
             st.session_state.report = review_with_progress(DeepSeekModel(config), config.model, source, filename, focus)
@@ -203,10 +227,12 @@ if st.button("开始审查", type="primary", disabled=review_disabled):
 
 report = st.session_state.report
 if report:
-    stale = snapshot_is_stale(source, report)
+    stale = snapshot_is_stale(source, report, filename)
     st.subheader("3. 审查报告")
+    if report.schema_version == "1.0":
+        st.info("这是旧版本报告。新增预算字段可能为兼容默认值，重新审查可获取当前版本的完整统计。")
     if stale:
-        st.warning("当前编辑区与报告源码快照不同。报告仍可查看，但追问和旧补丁已禁用；请重新审查。")
+        st.warning("当前文件名或源码与报告快照不同。报告仍可查看，但追问和旧补丁已禁用；请重新审查。")
     summary = report.summary
     metric_cols = st.columns(3)
     for col, label, value in zip(metric_cols, ["已确认问题", "需要人工确认", "总用时（s）"],
@@ -228,21 +254,33 @@ if report:
                 safe_title = escape_markdown_tildes(finding.title)
                 label = f"{SEVERITY_BADGES[finding.severity]} {safe_title} · 第 {finding.line_start}-{finding.line_end} 行"
                 with st.expander(label, expanded=finding.severity == "high"):
+                    st.write(f"**确认情况：** {CONFIRMATIONS[finding.status]}")
                     if finding.rule_id:
                         st.write(f"**检查依据：** {finding_basis(finding)}")
                     if finding.finding_id in reflection_details:
                         st.write(f"**AI 复核结论：** {escape_markdown_tildes(reflection_details[finding.finding_id])}")
                     if finding.validation_hint:
                         st.write(f"**程序核验依据：** {escape_markdown_tildes(finding.validation_hint)}")
+                    if finding.review_note and finding.finding_id not in reflection_details:
+                        st.write(f"**审查说明：** {escape_markdown_tildes(finding.review_note)}")
                     st.code(finding.evidence, language="python")
                     st.write(f"**触发：** {escape_markdown_tildes(finding.trigger)}")
                     st.write(f"**解释：** {escape_markdown_tildes(finding.explanation)}")
                     st.write(f"**建议：** {escape_markdown_tildes(finding.suggestion)}")
-                    if st.button("生成修复", key=f"fix-{finding.finding_id}", disabled=stale):
-                        with st.spinner("正在生成并验证局部补丁…"):
-                            result = generate_patch(DeepSeekModel(config), source, f"修复 {finding.title}", filename, finding)
-                            st.session_state.patch = result
-                            st.session_state.patch_hash = report.source_hash
+                    if st.button("生成修复", key=f"fix-{finding.finding_id}", disabled=stale or not bool(config.api_key)):
+                        operation_model = None
+                        st.session_state.patch = None
+                        st.session_state.patch_hash = None
+                        try:
+                            operation_model = RecordingModel(DeepSeekModel(config))
+                            with st.spinner("正在生成并验证局部补丁…"):
+                                result = generate_patch(operation_model, source, f"修复 {finding.title}", filename, finding)
+                                st.session_state.patch = result
+                                st.session_state.patch_hash = report.source_hash
+                        except Exception as exc:
+                            st.error(escape_markdown_tildes(f"生成修复失败：{exc}"))
+                        finally:
+                            remember_interaction_usage(operation_model, "局部修复")
 
     render_finding_group("已确认问题", report.findings, "本次没有已确认问题。")
     render_finding_group("需要人工确认", report.pending_findings, "本次没有需要人工确认的问题。")
@@ -267,7 +305,14 @@ if report:
         st.markdown("**阶段用时**")
         st.table([{"步骤": STAGES.get(stage, stage), "用时（s）": f"{milliseconds / 1000:.2f}"}
                   for stage, milliseconds in report.usage.stage_ms.items()])
-        st.caption(f"模型调用 {report.usage.model_calls} 次 · 服务请求 {report.usage.http_attempts} 次 · 补充取证 {report.usage.tool_calls} 次")
+        usage = report.usage
+        st.caption(f"模型调用 {usage.model_calls}/{usage.model_call_limit} 次 · 初审 {usage.plan_rounds}/{usage.plan_round_limit} 轮 · 服务请求 {usage.http_attempts} 次 · 补充取证 {usage.tool_calls}/{usage.tool_call_limit} 次")
+        st.caption(f"初审结束原因：{STOP_REASONS[usage.initial_stop_reason]}。格式修正、复核和失败调用均计数，HTTP重试另计；本报告不含后续追问或修复。")
+        st.markdown("**逐次模型调用**")
+        st.table([{"调用": index, "阶段": STAGES.get(call.stage, call.stage),
+                   "用时（s）": f"{call.elapsed_ms / 1000:.2f}", "HTTP尝试": call.http_attempts,
+                   "状态": "失败" if call.failed else "完成"}
+                  for index, call in enumerate(usage.calls, 1)])
     st.download_button("导出 Markdown", report_markdown(report), file_name="trace-review.md", mime="text/markdown")
     st.download_button("导出 JSON", report_json(report), file_name="trace-review.json", mime="application/json")
 
@@ -278,22 +323,30 @@ if report:
     question = st.chat_input("围绕当前源码和报告追问", disabled=stale or not bool(config.api_key))
     if question:
         history = st.session_state.chat[-8:]
+        operation_model = None
         try:
+            operation_model = RecordingModel(DeepSeekModel(config))
             if any(word in question.lower() for word in ("修复", "补丁", "fix", "patch")):
-                patch_result = generate_patch(DeepSeekModel(config), source, question, filename)
+                st.session_state.patch = None
+                st.session_state.patch_hash = None
+                patch_result = generate_patch(operation_model, source, question, filename)
                 st.session_state.patch = patch_result
                 st.session_state.patch_hash = report.source_hash
                 answer = "已生成并验证补丁，请查看下方结果。" if patch_result.valid else "补丁未通过验证：" + "; ".join(patch_result.errors)
             else:
+                operation_model.stage = "followup"
                 payload = {"source": source, "report": report.model_dump(), "history": history, "question": question}
-                raw = DeepSeekModel(config).invoke(FOLLOWUP_SYSTEM, json.dumps(payload, ensure_ascii=False)).content
-                answer = str(parse_json_object(raw).get("answer", ""))
-                if not answer:
-                    raise ValueError("追问响应缺少 answer")
+                raw = operation_model.invoke(FOLLOWUP_SYSTEM, json.dumps(payload, ensure_ascii=False)).content
+                answer = FollowupResponse.model_validate(parse_json_object(raw)).answer
             st.session_state.chat = [*history, {"role": "user", "content": question}, {"role": "assistant", "content": answer}][-8:]
+            remember_interaction_usage(operation_model, "追问与修复")
             st.rerun()
         except Exception as exc:
             st.error(escape_markdown_tildes(f"追问失败：{exc}"))
+            remember_interaction_usage(operation_model, "追问与修复")
+    if st.session_state.interaction_usage:
+        interaction = st.session_state.interaction_usage
+        st.caption(f"最近一次{interaction['label']}：模型调用 {interaction['model_calls']}/{interaction['model_call_limit']} 次 · 服务请求 {interaction['http_attempts']} 次。与上方审查统计分开。")
     patch = st.session_state.patch
     if patch:
         if stale or st.session_state.patch_hash != report.source_hash:

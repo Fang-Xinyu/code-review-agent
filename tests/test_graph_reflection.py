@@ -78,7 +78,7 @@ def test_graph_tool_limit_per_round_and_second_round_can_use_tools(requested):
     report = ReviewAgent(model, "fake", no_ruff).review("x = 1\n" * 11, "x.py")
     assert report.usage.tool_calls == min(requested, 5) + 1
     assert model.calls[1][2] is not None
-    assert model.calls[2][2] is None
+    assert model.calls[2][2] is not None
     observations = json.loads(model.calls[1][1])["tool_observations"]
     executed = [x for x in observations if x["ok"]]
     skipped = [x for x in observations if not x["ok"]]
@@ -90,10 +90,10 @@ def test_graph_tool_limit_per_round_and_second_round_can_use_tools(requested):
 
 
 def test_graph_round_limit_forces_final():
-    responses = [ModelResult("", [{"id":f"t{i}","name":"read_source_range","args":{"start_line":1,"end_line":1}}]) for i in range(2)]
+    responses = [ModelResult("", [{"id":f"t{i}","name":"read_source_range","args":{"start_line":1,"end_line":1}}]) for i in range(4)]
     responses.append(ModelResult("", [{"id":"late","name":"read_source_range","args":{"start_line":1,"end_line":1}}]))
     report = ReviewAgent(ScriptedModel(responses), "fake", no_ruff).review("x=1\n", "x.py")
-    assert report.usage.model_calls == 3
+    assert report.usage.model_calls == 5
     assert any("轮次上限" in x for x in report.limitations)
 
 

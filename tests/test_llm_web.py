@@ -87,7 +87,8 @@ def test_thinking_disabled_in_http_requests_for_tools_review_and_reflection(monk
     assert all("reasoning_effort" not in body for body in requests)
     assert all("extra_body" not in body for body in requests)  # merged into the HTTP JSON body
     assert all(body.get("tools") for body in requests[:2])
-    assert all("tools" not in body for body in requests[2:])
+    assert requests[2].get("tools")  # early final response may still have tools available
+    assert "tools" not in requests[3]  # independent reflection has no tools
     assert [call.stage for call in report.usage.calls] == ["agent_reasoning"] * 3 + ["reflection"]
     assert report.usage.tool_calls == 2
     assert any(record.action == "reflection" for record in report.validation_records)
@@ -122,7 +123,7 @@ def test_streamlit_initial_screen_has_disabled_review_button():
     assert buttons["开始审查"].disabled is True
     assert buttons["测试连接"].disabled is True
     assert at.title[0].value == "TraceReview"
-    assert any("2 MiB UTF-8" in caption.value for caption in at.caption)
+    assert any("100 KB（102400 字节） UTF-8" in caption.value for caption in at.caption)
 
 
 def test_streamlit_review_displays_chinese_filters_and_seconds(monkeypatch):

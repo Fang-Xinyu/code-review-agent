@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
+
 from .models import ReviewedFinding, ReviewReport
 from .ui_text import (
     ACTIONS,
+    CONFIRMATIONS,
     ORIGINS,
     SEVERITIES,
     STAGES,
+    STOP_REASONS,
     TOOL_STATUSES,
     escape_markdown_tildes,
     finding_basis,
@@ -20,16 +24,19 @@ def _finding_md(item: ReviewedFinding, reflection_detail: str = "") -> str:
     basis = f"- 检查依据：{finding_basis(item)}\n" if item.rule_id else ""
     reflection = f"- AI 复核结论：{escape_markdown_tildes(reflection_detail)}\n" if reflection_detail else ""
     validation = f"- 程序核验依据：{escape_markdown_tildes(item.validation_hint)}\n" if item.validation_hint else ""
+    review_note = f"- 审查说明：{escape_markdown_tildes(item.review_note)}\n" if item.review_note and not reflection_detail else ""
+    fence = "`" * max(3, max((len(part) for part in re.findall(r'`+', item.evidence)), default=0) + 1)
     return f"""### 【{SEVERITIES[item.severity]}严重度】{escape_markdown_tildes(item.title)} · 第 {item.line_start}-{item.line_end} 行
 
 - 问题编号：{item.finding_id}
-{basis}{reflection}{validation}- 触发：{escape_markdown_tildes(item.trigger)}
+- 确认情况：{CONFIRMATIONS[item.status]}
+{basis}{reflection}{review_note}{validation}- 触发：{escape_markdown_tildes(item.trigger)}
 - 解释：{escape_markdown_tildes(item.explanation)}
 - 建议：{escape_markdown_tildes(item.suggestion)}
 
-```python
+{fence}python
 {item.evidence}
-```
+{fence}
 """
 
 
@@ -51,6 +58,8 @@ def report_markdown(report: ReviewReport) -> str:
     records = "\n".join(f"- {ACTIONS[x.action]} {x.finding_ref}：{escape_markdown_tildes(x.detail)}" for x in report.validation_records) or "- 无"
     limitations = "\n".join(f"- {escape_markdown_tildes(x)}" for x in report.limitations) or "- 无"
     usage = report.usage
+    compatibility_note = "旧版本报告的新增统计字段可能为兼容默认值，不能据此恢复原运行的真实轮数及结束原因。\n" if report.schema_version == "1.0" else ""
+    events = "\n".join(f"- {STAGES.get(event.stage, event.stage)}：{escape_markdown_tildes(event.message)}" for event in report.events) or "- 无"
     timings = "\n".join(f"- {STAGES.get(stage, stage)}：{ms / 1000:.2f} 秒" for stage, ms in usage.stage_ms.items()) or "- 无"
     def available(value):
         return "不可用" if value is None else str(value)
@@ -73,7 +82,10 @@ def report_markdown(report: ReviewReport) -> str:
 
 ## 最终摘要
 
+{compatibility_note}
 {escape_markdown_tildes(report.summary.text)}
+
+确认情况与严重度独立。AI复核通过不代表已运行行为测试；未保留问题不代表代码已证明正确。
 
 ## 已确认问题
 
@@ -95,14 +107,22 @@ def report_markdown(report: ReviewReport) -> str:
 
 {limitations}
 
+## 执行轨迹
+
+{events}
+
 ## 运行统计
 
 - 总用时：{usage.total_ms / 1000:.2f} 秒
-- 模型调用：{usage.model_calls} 次
+- 模型调用：{usage.model_calls}/{usage.model_call_limit} 次（含格式修正、独立复核和失败调用；HTTP 重试另计）
+- 初审轮数：{usage.plan_rounds}/{usage.plan_round_limit} 轮
+- 初审结束原因：{STOP_REASONS[usage.initial_stop_reason]}
 - HTTP 请求：{usage.http_attempts} 次
-- 补充取证：{usage.tool_calls} 次
+- 补充取证：{usage.tool_calls}/{usage.tool_call_limit} 次（不含固定AST/Ruff检查）
 - 输入 token 数：{usage.input_tokens if usage.input_tokens is not None else '不可用'}
 - 输出 token 数：{usage.output_tokens if usage.output_tokens is not None else '不可用'}
+
+以上统计仅属于生成此报告的一次审查，不包含连接测试、后续追问或补丁。未返回的token用量不可据此推断为零。
 
 ### 阶段用时
 
@@ -114,8 +134,10 @@ def report_markdown(report: ReviewReport) -> str:
 """
 
 
-def snapshot_is_stale(code: str, report: ReviewReport) -> bool:
+def snapshot_is_stale(code: str, report: ReviewReport, filename: str | None = None) -> bool:
     from .verification import normalize_and_validate
+    if filename is not None and filename != report.filename:
+        return True
     try:
         _, digest = normalize_and_validate(code, report.filename)
     except ValueError:

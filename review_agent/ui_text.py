@@ -11,6 +11,11 @@ ORIGINS = {"ast": "Python 语法结构检查（AST）", "ruff": "Python 静态�
 STAGES = {"validate_input": "输入检查", "static_analysis": "基础检查", "agent_reasoning": "AI 分析",
           "tool_execution": "读取补充证据", "parse_draft": "整理问题", "reconcile_and_ground": "核对源码证据",
           "reflection": "复核问题", "finalize_report": "生成报告"}
+STAGES.update({"draft_repair": "修正初审格式", "reflection_repair": "修正复核格式",
+               "followup": "报告追问", "patch_generation": "生成补丁", "patch_review": "复核补丁"})
+STOP_REASONS = {"candidate_submitted": "模型提前提交候选", "round_limit": "到达初审轮次上限，要求提交候选",
+                "budget_limit": "为格式修正与独立复核预留额度，停止取证",
+                "tool_request_rejected": "收尾时仍请求工具，已停止取证并保留静态发现"}
 TOOL_STATUSES = {"completed": "已完成", "unavailable": "不可用", "timeout": "超时", "error": "检查失败", "syntax_error": "发现语法错误"}
 ACTIONS = {"accepted": "证据通过", "rejected": "排除问题", "hidden": "隐藏问题", "relocated": "修正位置",
            "backfilled": "补回规则发现", "deduplicated": "合并重复问题", "truncated": "限制展示数量",

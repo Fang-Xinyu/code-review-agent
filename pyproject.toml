@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "trace-review-agent"
+name = "code-review-agent"
 version = "0.1.0"
 description = "Evidence-grounded Python code review agent"
 requires-python = ">=3.9"

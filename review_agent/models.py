@@ -4,7 +4,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .config import MAX_EVIDENCE_CHARS, MAX_SOURCE_BYTES
+from .config import MAX_EVIDENCE_CHARS, MAX_MODEL_CALLS, MAX_PLAN_ROUNDS, MAX_SOURCE_BYTES, MAX_TOOL_CALLS_PER_ROUND
 
 Severity = Literal["high", "medium", "low"]
 Category = Literal["bug", "boundary", "exception", "resource", "security", "maintainability"]
@@ -108,6 +108,11 @@ class UsageStats(StrictModel):
     tool_calls: int = Field(ge=0)
     input_tokens: Optional[int] = Field(default=None, ge=0)
     output_tokens: Optional[int] = Field(default=None, ge=0)
+    model_call_limit: int = Field(default=MAX_MODEL_CALLS, ge=1)
+    plan_rounds: int = Field(default=0, ge=0)
+    plan_round_limit: int = Field(default=MAX_PLAN_ROUNDS, ge=1)
+    tool_call_limit: int = Field(default=(MAX_PLAN_ROUNDS - 1) * MAX_TOOL_CALLS_PER_ROUND, ge=0)
+    initial_stop_reason: Literal["candidate_submitted", "round_limit", "budget_limit", "tool_request_rejected"] = "candidate_submitted"
 
 
 class ReviewSummary(StrictModel):
@@ -120,7 +125,7 @@ class ReviewSummary(StrictModel):
 
 
 class ReviewReport(StrictModel):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["1.0", "1.1"] = "1.1"
     filename: str
     source_hash: str
     focus: str
@@ -182,6 +187,22 @@ class PatchEdit(StrictModel):
 
 class PatchResponse(StrictModel):
     patches: list[PatchEdit] = Field(min_length=1, max_length=3)
+
+
+class PatchReviewResponse(StrictModel):
+    verdict: Literal["supported", "uncertain", "rejected"]
+    note: str = Field(min_length=1, max_length=1600, strict=True)
+
+
+class FollowupResponse(StrictModel):
+    answer: str = Field(min_length=1, strict=True)
+
+    @field_validator("answer")
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("追问响应缺少有效 answer")
+        return value
 
 
 class PatchValidation(StrictModel):

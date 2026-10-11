@@ -22,8 +22,8 @@ def normalize_and_validate(code: str, filename: str, focus: str = "") -> tuple[s
         raise ValueError("源码不能包含空字节")
     if len(normalized.splitlines()) > MAX_SOURCE_LINES:
         raise ValueError(f"源码超过 {MAX_SOURCE_LINES} 行")
-    if len(normalized.encode("utf-8")) > MAX_SOURCE_BYTES:
-        raise ValueError("源码 UTF-8 大小超过 2 MiB")
+    if len(code.encode("utf-8")) > MAX_SOURCE_BYTES:
+        raise ValueError("源码 UTF-8 大小超过 100 KB（102400 字节）")
     return normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 

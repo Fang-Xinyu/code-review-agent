@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .config import ModelConfig
+from .config import MAX_SOURCE_BYTES, ModelConfig
 from .graph import ReviewAgent
 from .llm import DeepSeekModel
 from .reporting import report_json, report_markdown
@@ -29,7 +29,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     path = Path(args.path)
     try:
-        code = path.read_text(encoding="utf-8")
+        with path.open("rb") as source_file:
+            raw = source_file.read(MAX_SOURCE_BYTES + 1)
+        if len(raw) > MAX_SOURCE_BYTES:
+            raise ValueError("源码 UTF-8 大小超过 100 KB（102400 字节）")
+        code = raw.decode("utf-8")
         report = ReviewAgent(DeepSeekModel(config), config.model).review(code, path.name, args.focus)
         output = report_json(report) if args.format == "json" else report_markdown(report)
         if args.output:

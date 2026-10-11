@@ -7,8 +7,8 @@ import json
 from pydantic import ValidationError
 
 from .ast_rules import analyze_ast
-from .llm import ModelLike, parse_json_object
-from .models import PatchEdit, PatchResponse, PatchValidation, ReviewedFinding
+from .llm import ModelLike, RecordingModel, parse_json_object
+from .models import PatchEdit, PatchResponse, PatchReviewResponse, PatchValidation, ReviewedFinding
 from .prompts import PATCH_REVIEW_SYSTEM, PATCH_SYSTEM
 from .ruff_adapter import diagnostic_key, run_ruff
 
@@ -94,8 +94,11 @@ def _key_text(key: tuple[str, str | None, int, str]) -> str:
 
 def generate_patch(model: ModelLike, code: str, goal: str, filename: str = "input.py",
                    target: ReviewedFinding | None = None, ruff_runner=run_ruff) -> PatchValidation:
+    if not isinstance(model, RecordingModel):
+        model = RecordingModel(model)
     previous_error = ""
     for _ in range(2):
+        model.stage = "patch_generation"
         payload = {"filename": filename, "goal": goal, "source": code,
                    "target": target.model_dump() if target else None, "previous_validation_error": previous_error,
                    "schema": PatchResponse.model_json_schema()}
@@ -103,21 +106,22 @@ def generate_patch(model: ModelLike, code: str, goal: str, filename: str = "inpu
         try:
             response = PatchResponse.model_validate(parse_json_object(result.content))
             validation = apply_and_validate_patches(code, response.patches, filename, target, ruff_runner)
-            if validation.valid:
-                review = model.invoke(PATCH_REVIEW_SYSTEM, json.dumps({"goal": goal, "original": code,
-                    "patched": validation.patched_code, "diff": validation.diff}, ensure_ascii=False))
-                decision = parse_json_object(review.content)
-                verdict = decision.get("verdict")
-                note = str(decision.get("note", ""))[:1600]
-                if verdict != "supported":
-                    validation.valid = False
-                    validation.errors.append(f"补丁独立复核未支持：{verdict or '格式错误'} {note}")
-                    validation.patched_code = None
-                    validation.diff = None
-                else:
-                    validation.model_note = note
-                return validation
-            previous_error = "; ".join(validation.errors)[:1000]
-        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        except (ValidationError, ValueError) as exc:
             previous_error = str(exc)[:1000]
+            continue
+        if not validation.valid:
+            previous_error = "; ".join(validation.errors)[:1000]
+            continue
+        # Review a validated patch once; review format failure must not regenerate code.
+        model.stage = "patch_review"
+        review = model.invoke(PATCH_REVIEW_SYSTEM, json.dumps({"goal": goal, "original": code,
+            "patched": validation.patched_code, "diff": validation.diff}, ensure_ascii=False))
+        try:
+            decision = PatchReviewResponse.model_validate(parse_json_object(review.content))
+        except (ValidationError, ValueError):
+            return PatchValidation(valid=False, errors=["补丁独立复核响应格式不合法，补丁正文已隐藏"])
+        if decision.verdict != "supported":
+            return PatchValidation(valid=False, errors=[f"补丁独立复核未支持：{decision.verdict} {decision.note}"])
+        validation.model_note = decision.note
+        return validation
     return PatchValidation(valid=False, errors=[f"补丁经一次修正后仍未通过：{previous_error}"])

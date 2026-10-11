@@ -4,7 +4,7 @@ import json
 
 from pydantic import ValidationError
 
-from .llm import ModelLike, parse_json_object
+from .llm import ModelLike, RecordingModel, parse_json_object
 from .models import ReflectionResponse, ReviewedFinding, ValidationRecord
 from .prompts import REFLECTION_SYSTEM
 
@@ -18,6 +18,8 @@ def reflect(model: ModelLike, candidates: list[ReviewedFinding], code: str | Non
     calls = 0
     input_tokens = output_tokens = None
     for _ in range(2):
+        if isinstance(model, RecordingModel):
+            model.stage = "reflection" if calls == 0 else "reflection_repair"
         calls += 1
         last_result = model.invoke(REFLECTION_SYSTEM, json.dumps({"source": code, "candidates": payload, "previous_error": error, "reflection_schema": ReflectionResponse.model_json_schema()}, ensure_ascii=False))
         input_tokens = _add_tokens(input_tokens, last_result.input_tokens)

@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 from langchain_openai import ChatOpenAI
 
-from .config import ModelConfig
+from .config import MAX_MODEL_CALLS, ModelConfig
 from .models import ModelAttemptStats, ModelCallStats
 
 
@@ -59,6 +59,10 @@ class DeepSeekModel:
                 calls = []
                 for call in getattr(response, "tool_calls", []) or []:
                     calls.append({"id": call.get("id", ""), "name": call.get("name", ""), "args": call.get("args", {})})
+                # LangChain separates malformed JSON arguments from parsed tool calls.
+                # Preserve them so the executor can return a bounded, structured error.
+                for call in getattr(response, "invalid_tool_calls", []) or []:
+                    calls.append({"id": call.get("id", ""), "name": call.get("name") or "", "args": call.get("args", "")})
                 metadata = getattr(response, "response_metadata", None) or {}
                 token_usage = metadata.get("token_usage") or {}
                 details = usage.get("output_token_details") or token_usage.get("completion_tokens_details") or {}
@@ -114,19 +118,30 @@ def _attempt_stats(started: float, result: ModelResult | None) -> ModelAttemptSt
         reasoning_tokens=result.reasoning_tokens if result else None, failed=result is None)
 
 
+class ModelBudgetExceeded(RuntimeError):
+    """The operation cannot issue another logical model call."""
+
+
 class RecordingModel:
     """Per-run metadata only: no prompts, keys, source or private reasoning retained."""
 
-    def __init__(self, model: ModelLike):
+    def __init__(self, model: ModelLike, max_calls: int = MAX_MODEL_CALLS):
         self.model = model
+        self.max_calls = max_calls
         self.calls: list[ModelCallStats] = []
         self.stage = "review"
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.max_calls - len(self.calls))
 
     @property
     def attempts(self) -> int:
         return sum(x.http_attempts for x in self.calls)
 
     def invoke(self, system: str, user: str, tools=None) -> ModelResult:
+        if not self.remaining:
+            raise ModelBudgetExceeded(f"本次操作已达到 {self.max_calls} 次模型调用上限")
         started = time.perf_counter()
         before = getattr(self.model, "attempts", 0)
         offset = len(getattr(self.model, "request_stats", []))

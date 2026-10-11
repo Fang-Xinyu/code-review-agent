@@ -31,6 +31,8 @@ INITIAL_SYSTEM = f"""TraceReview 初审（initial-review）提示词 v{PROMPT_VE
 需要工具时直接输出工具请求，不额外输出长篇审查正文。
 收到工具观察后，结合已有信息继续检查；证据充分时直接返回最终JSON。
 达到工具预算时基于已获得证据作答，不编造缺失信息。
+注意 remaining_model_calls 是本次审查剩余总调用额度，包含格式修正和独立复核；按 instruction 要求及时提交候选。
+工具 truncated=true 表示输出不完整，不得将未返回内容视为不存在；使用 next_start_line 或 next_offset 继续读取，单行过长时明确证据限制。
 
 【候选质量】
 每条问题只描述一个故障机制或明确的注释矛盾。

@@ -26,5 +26,6 @@ class ReviewState(TypedDict, total=False):
     stage_ms: dict[str, int]
     started_at: float
     force_final: bool
+    initial_stop_reason: str
     last_model_result: Any
     report: Any

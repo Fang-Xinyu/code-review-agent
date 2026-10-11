@@ -38,9 +38,9 @@ def test_maximum_utf8_size_is_accepted():
     assert len(normalized.encode("utf-8")) == MAX_SOURCE_BYTES
 
 
-def test_utf8_size_over_two_mib_is_rejected():
+def test_utf8_size_over_100_kib_is_rejected():
     code = "#" + "中" * (MAX_SOURCE_BYTES // 3 + 1)
-    with pytest.raises(ValueError, match="2 MiB"):
+    with pytest.raises(ValueError, match="100 KB"):
         normalize_and_validate(code, "x.py")
 
 
