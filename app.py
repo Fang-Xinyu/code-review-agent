@@ -18,6 +18,7 @@ from review_agent.prompts import FOLLOWUP_SYSTEM
 from review_agent.reporting import report_json, report_markdown, snapshot_is_stale
 from review_agent.ui_text import ACTIONS, CONFIRMATIONS, ORIGINS, STAGES, STOP_REASONS, TOOL_STATUSES, escape_markdown_tildes, finding_basis
 from review_agent.verification import normalize_and_validate
+from review_agent.source import source_lines
 
 
 ROOT = Path(__file__).parent
@@ -141,7 +142,7 @@ input_method = st.radio(
 if input_method == "内置示例":
     selected = st.selectbox("选择示例", list(EXAMPLES))
     example_source = EXAMPLES[selected].read_text(encoding="utf-8")
-    example_lines = len(example_source.splitlines())
+    example_lines = len(source_lines(example_source))
     st.caption(f"{selected} · {example_lines} 行")
     with st.expander("查看示例代码"):
         st.code(example_source, language="python", line_numbers=True, height=320)
@@ -164,7 +165,7 @@ elif input_method == "上传代码":
                 upload_error = "该文件的 UTF-8 大小超过 100 KB（102400 字节）上限，无法载入审查。"
             else:
                 uploaded_source = uploaded_bytes.decode("utf-8")
-                uploaded_lines = len(uploaded_source.replace("\r\n", "\n").replace("\r", "\n").splitlines())
+                uploaded_lines = len(source_lines(uploaded_source.replace("\r\n", "\n").replace("\r", "\n")))
             if upload_error is None and uploaded_lines > MAX_SOURCE_LINES:
                 upload_error = f"该文件共 {uploaded_lines} 行，超过 {MAX_SOURCE_LINES} 行上限，无法载入审查。"
             elif upload_error is None:
@@ -180,7 +181,7 @@ elif input_method == "上传代码":
         else:
             st.success(f"已读取 {upload.name} · {uploaded_lines} 行")
         if uploaded_source is not None:
-            preview = uploaded_source if uploaded_lines <= MAX_SOURCE_LINES else "\n".join(uploaded_source.splitlines()[:200])
+            preview = uploaded_source if uploaded_lines <= MAX_SOURCE_LINES else "\n".join(source_lines(uploaded_source)[:200])
             preview_title = "查看上传代码" if uploaded_lines <= MAX_SOURCE_LINES else "查看前 200 行"
             with st.expander(preview_title):
                 st.code(preview, language="python", line_numbers=True, height=320)
@@ -195,9 +196,9 @@ else:
 st.markdown("#### 代码预览与编辑")
 filename = st.text_input("文件名", key="filename", help="文件名必须以 .py 结尾")
 source = st.text_area("Python 代码", key="source", height=420)
-source_lines = len(source.replace("\r\n", "\n").replace("\r", "\n").splitlines())
+source_line_count = len(source_lines(source.replace("\r\n", "\n").replace("\r", "\n")))
 source_bytes = len(source.encode("utf-8"))
-st.caption(f"当前 {source_lines} / {MAX_SOURCE_LINES} 行 · UTF-8 {source_bytes / 1024:.2f} / {MAX_SOURCE_BYTES / 1024:.0f} KB")
+st.caption(f"当前 {source_line_count} / {MAX_SOURCE_LINES} 行 · UTF-8 {source_bytes / 1024:.2f} / {MAX_SOURCE_BYTES / 1024:.0f} KB")
 try:
     _, st.session_state.current_hash = normalize_and_validate(source, filename)
     input_error = None

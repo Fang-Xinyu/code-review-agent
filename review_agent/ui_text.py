@@ -29,6 +29,7 @@ RULE_LABELS.update({
     "F822": "__all__ 中包含未定义名称", "F823": "局部变量在赋值前被引用",
     "F841": "局部变量赋值后未使用", "F901": "错误地抛出 NotImplemented",
     "E902": "源码读取错误", "E999": "Python 语法错误",
+    "invalid-syntax": "Python 语法错误",
 })
 
 

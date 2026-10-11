@@ -9,6 +9,7 @@ from typing import Any
 
 from .models import StaticFinding, ToolStatus
 from .config import MAX_EVIDENCE_CHARS
+from .source import source_lines
 
 
 # Project severity defaults describe impact, independently of confirmation status.
@@ -16,8 +17,12 @@ LOW_IMPACT_RULES = {"F401", "F541", "F841"}
 HIGH_IMPACT_RULES = {"F821", "F822", "F823"}
 
 
+def _syntax_rule(rule_id: str) -> bool:
+    return rule_id.startswith("E9") or rule_id == "invalid-syntax"
+
+
 def ruff_severity(rule_id: str) -> str:
-    if rule_id.startswith("E9") or rule_id in HIGH_IMPACT_RULES:
+    if _syntax_rule(rule_id) or rule_id in HIGH_IMPACT_RULES:
         return "high"
     if rule_id in LOW_IMPACT_RULES:
         return "low"
@@ -28,7 +33,7 @@ def parse_ruff_json(text: str, code: str) -> list[StaticFinding]:
     payload = json.loads(text or "[]")
     if not isinstance(payload, list):
         raise ValueError("Ruff JSON 顶层必须是列表")
-    lines = code.splitlines()
+    lines = source_lines(code)
     findings: list[StaticFinding] = []
     for item in payload:
         rule_id = str(item.get("code") or "RUFF")
@@ -47,6 +52,7 @@ def parse_ruff_json(text: str, code: str) -> list[StaticFinding]:
         findings.append(StaticFinding(
             title=f"{rule_id}: {message}"[:160], severity=ruff_severity(rule_id),
             category="maintainability" if rule_id in LOW_IMPACT_RULES else "bug", line_start=start_line, line_end=end_line, evidence=evidence,
+            column_start=max(1, int(loc.get("column", 1))), column_end=max(1, int(end.get("column", 1))),
             trigger="Ruff 对该源码位置产生了确定性诊断。", explanation=message[:2400],
             suggestion=str((item.get("fix") or {}).get("message") or "根据 Ruff 诊断修正该位置。")[:1600],
             rule_id=rule_id, origin="ruff", scope="Ruff F/E9 静态检查" + ("；证据较长，仅展示连续原文片段，完整源码仍参与审查" if truncated else ""),
@@ -89,7 +95,7 @@ def run_ruff(code: str, filename: str = "input.py", timeout: float = 11.0) -> tu
         return [], ToolStatus(name="ruff", status="error", detail="Ruff 返回了无法解析的 JSON")
     if result.returncode not in (0, 1):
         return [], ToolStatus(name="ruff", status="error", detail=f"Ruff 异常退出（代码 {result.returncode}）")
-    syntax = any((f.rule_id or "").startswith("E9") for f in findings)
+    syntax = any(_syntax_rule(f.rule_id or "") for f in findings)
     status = "syntax_error" if syntax else "completed"
     return findings, ToolStatus(name="ruff", status=status, detail="已固定执行 F/E9 规则", finding_count=len(findings))
 

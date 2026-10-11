@@ -25,6 +25,7 @@ from .ruff_adapter import run_ruff
 from .state import ReviewState
 from .tools import TOOL_SCHEMAS, EvidenceTools
 from .verification import normalize_and_validate, reconcile
+from .source import source_lines
 
 
 class ReviewAgent:
@@ -100,7 +101,7 @@ class ReviewAgent:
         validated = ReviewInput(code=code, filename=state["filename"], focus=state.get("focus", ""), source_hash=digest)
         return {"code": validated.code, "filename": validated.filename, "focus": validated.focus,
                 "source_hash": validated.source_hash,
-                "events": self._event(state, "validate_input", f"输入通过：{len(code.splitlines())} 行，SHA-256 {digest[:12]}")}
+                "events": self._event(state, "validate_input", f"输入通过：{len(source_lines(code))} 行，SHA-256 {digest[:12]}")}
 
     def _static(self, state: ReviewState) -> dict[str, Any]:
         ast_findings, ast_status = analyze_ast(state["code"])
@@ -117,7 +118,7 @@ class ReviewAgent:
     def _reason(self, state: ReviewState) -> dict[str, Any]:
         rounds = state.get("plan_rounds", 0) + 1
         force = rounds >= self.MAX_PLAN_ROUNDS or self.model.remaining <= 4
-        numbered = "\n".join(f"{i:4d} | {line}" for i, line in enumerate(state["code"].splitlines(), 1))
+        numbered = "\n".join(f"{i:4d} | {line}" for i, line in enumerate(source_lines(state["code"]), 1))
         static = [x.model_dump() for x in state.get("static_findings", [])]
         observations = state.get("messages", [])
         instruction = "已到预算上限，禁止再调工具，立即返回最终 JSON。" if force else f"每轮最多调用 {self.MAX_TOOL_CALLS_PER_ROUND} 次工具追加取证，或直接返回最终 JSON。"

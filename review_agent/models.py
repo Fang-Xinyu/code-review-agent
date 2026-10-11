@@ -59,6 +59,8 @@ class ReviewedFinding(FindingDraft):
 
 class StaticFinding(FindingDraft):
     origin: Literal["ast", "ruff"]
+    column_start: int = Field(default=1, ge=1)
+    column_end: int = Field(default=1, ge=1)
     scope: str = Field(default="", max_length=1200)
     symbol: Optional[str] = Field(default=None, max_length=200)
     needs_context: bool = False
@@ -141,7 +143,7 @@ class ReviewReport(StrictModel):
 
 
 class DraftResponse(StrictModel):
-    findings: list[FindingDraft] = Field(default_factory=list, max_length=60)
+    findings: list[FindingDraft] = Field(max_length=60)
 
 
 class ReflectionChanges(StrictModel):

@@ -6,6 +6,7 @@ from typing import Iterable
 
 from .models import StaticFinding
 from .config import MAX_EVIDENCE_CHARS
+from .source import source_lines
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ RULES = {
     "AST101": Rule("AST101", "可变默认参数", "medium", "bug", "默认对象在函数定义时创建，调用之间会共享状态。", "使用 None 作默认值，并在函数内创建新对象。", "函数定义"),
     "AST102": Rule("AST102", "裸 except", "medium", "exception", "裸 except 会捕获 SystemExit、KeyboardInterrupt 等不应被普通业务处理吞掉的异常。", "捕获能够处理的具体异常类型。", "异常处理"),
     "AST103": Rule("AST103", "异常被静默忽略", "medium", "exception", "捕获后仅执行 pass，失败原因和程序状态都不可见。", "仅捕获预期异常，并记录、转换或重新抛出。", "异常处理"),
-    "AST104": Rule("AST104", "字面量除零", "high", "bug", "该表达式必然触发 ZeroDivisionError。", "修正分母，或在运算前验证其非零。", "算术表达式"),
+    "AST104": Rule("AST104", "字面量除零", "high", "bug", "使用数值执行该表达式时，零分母会触发 ZeroDivisionError。", "修正分母，或在运算前验证其非零。", "算术表达式"),
     "AST105": Rule("AST105", "finally 中 return", "medium", "exception", "finally 中的 return 可覆盖 try/except 中的返回值或待抛出异常。", "将 return 移出 finally，finally 只负责清理。", "try/finally"),
     "AST106": Rule("AST106", "动态代码执行", "medium", "security", "eval/exec 会执行动态内容，当内容可被外部影响时会形成代码执行风险。", "改用明确的解析器或受限数据格式。", "调用点", True),
     "AST107": Rule("AST107", "文件句柄可能未关闭", "medium", "resource", "open() 的结果未交给 with，且当前作用域未看到对该变量的 close() 调用。", "使用 with open(...) as handle 管理文件生命周期。", "当前语法作用域", True),
@@ -38,7 +39,7 @@ def _segment(code: str, node: ast.AST) -> str:
     value = ast.get_source_segment(code, node)
     if value:
         return value
-    lines = code.splitlines()
+    lines = source_lines(code)
     return lines[max(0, getattr(node, "lineno", 1) - 1)] if lines else ""
 
 
@@ -52,6 +53,8 @@ def _finding(code: str, node: ast.AST, rule_id: str, *, symbol: str | None = Non
         title=rule.title, severity=rule.severity, category=rule.category,
         line_start=start,
         line_end=start + evidence.count("\n"),
+        column_start=getattr(node, "col_offset", 0) + 1,
+        column_end=getattr(node, "end_col_offset", 0) + 1,
         evidence=evidence, trigger=rule.explanation,
         explanation=rule.explanation, suggestion=rule.suggestion,
         rule_id=rule.rule_id, origin="ast", scope=scope,
@@ -61,6 +64,12 @@ def _finding(code: str, node: ast.AST, rule_id: str, *, symbol: str | None = Non
 
 def _is_zero(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, (int, float, complex)) and node.value == 0
+
+
+def _is_numeric_literal(node: ast.AST) -> bool:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        node = node.operand
+    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float))
 
 
 def _walk_without_nested_scopes(node: ast.AST) -> Iterable[ast.AST]:
@@ -118,7 +127,8 @@ class Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
-        if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)) and _is_zero(node.right):
+        numeric_modulo = isinstance(node.op, ast.Mod) and _is_numeric_literal(node.left)
+        if (isinstance(node.op, (ast.Div, ast.FloorDiv)) or numeric_modulo) and _is_zero(node.right):
             self.findings.append(_finding(self.code, node, "AST104"))
         self.generic_visit(node)
 
@@ -151,16 +161,19 @@ def analyze_ast(code: str) -> tuple[list[StaticFinding], str]:
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
-        line = max(1, exc.lineno or 1)
-        lines = code.splitlines()
-        evidence = lines[line - 1] if line <= len(lines) else "<EOF>"
+        lines = source_lines(code)
+        line = min(max(1, exc.lineno or 1), len(lines))
+        while line > 1 and not lines[line - 1].strip():
+            line -= 1
+        evidence = lines[line - 1] or "<EOF>"
         rule = RULES["AST001"]
         finding = StaticFinding(title=rule.title, severity="high", category="bug", line_start=line,
-            line_end=line, evidence=evidence[:MAX_EVIDENCE_CHARS], trigger=exc.msg[:1200], explanation=rule.explanation,
+            line_end=line, evidence=evidence[:MAX_EVIDENCE_CHARS],
+            trigger=f"第 {exc.lineno or line} 行：{exc.msg}"[:1200], explanation=rule.explanation,
             suggestion=rule.suggestion, rule_id="AST001", origin="ast", scope=rule.scope)
         return [finding], "syntax_error"
     visitor = Visitor(code)
     visitor._resource_checks(tree)
     visitor.visit(tree)
-    unique = {(x.rule_id, x.line_start, x.line_end, x.evidence): x for x in visitor.findings}
+    unique = {(x.rule_id, x.line_start, x.column_start, x.line_end, x.column_end, x.evidence): x for x in visitor.findings}
     return list(unique.values()), "completed"

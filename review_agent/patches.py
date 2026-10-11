@@ -11,11 +11,12 @@ from .llm import ModelLike, RecordingModel, parse_json_object
 from .models import PatchEdit, PatchResponse, PatchReviewResponse, PatchValidation, ReviewedFinding
 from .prompts import PATCH_REVIEW_SYSTEM, PATCH_SYSTEM
 from .ruff_adapter import diagnostic_key, run_ruff
+from .source import source_lines
 
 
 def apply_and_validate_patches(code: str, patches: list[PatchEdit], filename: str = "input.py",
                                target: ReviewedFinding | None = None, ruff_runner=run_ruff) -> PatchValidation:
-    lines = code.splitlines()
+    lines = source_lines(code)
     ordered = sorted(patches, key=lambda x: x.line_start)
     errors: list[str] = []
     previous_end = 0
@@ -32,7 +33,7 @@ def apply_and_validate_patches(code: str, patches: list[PatchEdit], filename: st
         return PatchValidation(valid=False, errors=errors)
     changed = list(lines)
     for patch in reversed(ordered):
-        changed[patch.line_start - 1:patch.line_end] = patch.replacement.splitlines()
+        changed[patch.line_start - 1:patch.line_end] = source_lines(patch.replacement)
     patched = "\n".join(changed) + ("\n" if code.endswith("\n") else "")
     try:
         ast.parse(patched)
@@ -69,7 +70,7 @@ def apply_and_validate_patches(code: str, patches: list[PatchEdit], filename: st
         after_ast, _ = analyze_ast(patched)
         if any(x.rule_id == target.rule_id and x.line_start in _mapped_lines(target.line_start, ordered) for x in after_ast):
             errors.append(f"目标 AST 诊断 {target.rule_id} 在修改后对应位置仍存在")
-    diff = "\n".join(difflib.unified_diff(code.splitlines(), patched.splitlines(), fromfile=f"a/{filename}", tofile=f"b/{filename}", lineterm=""))
+    diff = "\n".join(difflib.unified_diff(source_lines(code), source_lines(patched), fromfile=f"a/{filename}", tofile=f"b/{filename}", lineterm=""))
     return PatchValidation(valid=not errors, patched_code=patched if not errors else None, diff=diff if not errors else None,
                            errors=errors, resolved_diagnostics=resolved, new_diagnostics=new)
 
@@ -80,7 +81,7 @@ def _mapped_lines(line: int, patches: list[PatchEdit]) -> range:
     for patch in patches:
         if line < patch.line_start:
             break
-        replacement_count = len(patch.replacement.splitlines())
+        replacement_count = len(source_lines(patch.replacement))
         if line <= patch.line_end:
             start = patch.line_start + offset
             return range(start, start + replacement_count)

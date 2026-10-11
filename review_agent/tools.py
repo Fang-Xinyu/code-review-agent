@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import MAX_TOOL_OUTPUT_CHARS
 from .models import StaticFinding
+from .source import source_lines
 
 
 class ToolArgs(BaseModel):
@@ -43,7 +44,7 @@ class EvidenceTools:
         if max_chars < 512:
             raise ValueError("工具输出限制至少为 512 字符")
         self.code = code
-        self.lines = code.splitlines()
+        self.lines = source_lines(code)
         self.findings = findings
         self.max_chars = max_chars
         self.seen: Counter[str] = Counter()

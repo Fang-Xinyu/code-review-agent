@@ -3,10 +3,12 @@ from __future__ import annotations
 import ast
 import hashlib
 import io
+import json
 import tokenize
 
 from .config import MAX_SOURCE_BYTES, MAX_SOURCE_LINES
 from .models import FindingDraft, ReviewedFinding, StaticFinding, ValidationRecord
+from .source import source_lines
 
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -20,20 +22,23 @@ def normalize_and_validate(code: str, filename: str, focus: str = "") -> tuple[s
         raise ValueError("源码不能为空")
     if "\x00" in normalized:
         raise ValueError("源码不能包含空字节")
-    if len(normalized.splitlines()) > MAX_SOURCE_LINES:
+    if len(source_lines(normalized)) > MAX_SOURCE_LINES:
         raise ValueError(f"源码超过 {MAX_SOURCE_LINES} 行")
     if len(code.encode("utf-8")) > MAX_SOURCE_BYTES:
         raise ValueError("源码 UTF-8 大小超过 100 KB（102400 字节）")
     return normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def finding_id(origin: str, rule_id: str | None, start: int, evidence: str) -> str:
-    raw = f"{origin}|{rule_id or ''}|{start}|{evidence}".encode("utf-8")
+def finding_id(origin: str, rule_id: str | None, start: int, evidence: str,
+               *, column_start: int = 1, column_end: int = 1,
+               symbol: str | None = None, explanation: str = "") -> str:
+    raw = json.dumps([origin, rule_id, start, column_start, column_end, evidence, symbol, explanation],
+                     ensure_ascii=False).encode("utf-8")
     return "F-" + hashlib.sha256(raw).hexdigest()[:12]
 
 
-def _positions(code: str, evidence: str) -> list[tuple[int, int]]:
-    results: list[tuple[int, int]] = []
+def _positions(code: str, evidence: str) -> list[tuple[int, int, int, int]]:
+    results: list[tuple[int, int, int, int]] = []
     pos = 0
     while True:
         idx = code.find(evidence, pos)
@@ -41,16 +46,29 @@ def _positions(code: str, evidence: str) -> list[tuple[int, int]]:
             break
         start = code.count("\n", 0, idx) + 1
         end = start + evidence.count("\n")
-        results.append((start, end))
+        results.append((start, end, idx, idx + len(evidence)))
         pos = idx + 1
     return results
 
 
-def _comment_or_docstring_only(code: str, evidence: str, start_line: int, end_line: int) -> bool:
+def _comment_or_docstring_only(code: str, start: int, end: int) -> bool:
+    excerpt = code[start:end]
+    start += len(excerpt) - len(excerpt.lstrip())
+    end -= len(excerpt) - len(excerpt.rstrip())
+    lines = code.split("\n")
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+
+    def position(row: int, column: int, *, utf8: bool = False) -> int:
+        if utf8:
+            column = len(lines[row - 1].encode("utf-8")[:column].decode("utf-8"))
+        return offsets[row - 1] + column
+
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
-        comment_ranges = {(t.start[0], t.end[0]) for t in tokens if t.type == tokenize.COMMENT and evidence.strip() in t.string}
-        if any(a <= start_line and b >= end_line for a, b in comment_ranges):
+        comment_ranges = [(position(*t.start), position(*t.end)) for t in tokens if t.type == tokenize.COMMENT]
+        if any(a <= start and end <= b for a, b in comment_ranges):
             return True
         tree = ast.parse(code)
         for node in ast.walk(tree):
@@ -58,7 +76,9 @@ def _comment_or_docstring_only(code: str, evidence: str, start_line: int, end_li
                 body = getattr(node, "body", [])
                 if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
                     doc = body[0]
-                    if doc.lineno <= start_line <= end_line <= getattr(doc, "end_lineno", doc.lineno) and evidence in (ast.get_source_segment(code, doc) or ""):
+                    a = position(doc.lineno, doc.col_offset, utf8=True)
+                    b = position(doc.end_lineno, doc.end_col_offset, utf8=True)
+                    if a <= start and end <= b:
                         return True
     except (SyntaxError, tokenize.TokenError):
         return False
@@ -69,7 +89,7 @@ def ground_model_findings(code: str, drafts: list[FindingDraft], static: list[St
     accepted: list[ReviewedFinding] = []
     records: list[ValidationRecord] = []
     static_keys = {(x.rule_id, x.line_start): x for x in static}
-    line_count = max(1, len(code.splitlines()))
+    line_count = max(1, len(source_lines(code)))
     for index, draft in enumerate(drafts):
         ref = f"model[{index}]"
         positions = _positions(code, draft.evidence)
@@ -81,7 +101,7 @@ def ground_model_findings(code: str, drafts: list[FindingDraft], static: list[St
             detail = "证据不存在" if not positions else "证据出现多次且无法唯一定位"
             records.append(ValidationRecord(action="rejected", finding_ref=ref, detail=detail))
             continue
-        if target[1] > line_count or _comment_or_docstring_only(code, draft.evidence, *target):
+        if target[1] > line_count or _comment_or_docstring_only(code, target[2], target[3]):
             records.append(ValidationRecord(action="rejected", finding_ref=ref, detail="证据仅位于注释或独立文档字符串中"))
             continue
         rule_id = draft.rule_id
@@ -105,8 +125,10 @@ def ground_model_findings(code: str, drafts: list[FindingDraft], static: list[St
 def static_to_reviewed(item: StaticFinding) -> ReviewedFinding:
     status = "needs_confirmation" if item.needs_context else "static_confirmed"
     severity = item.severity
-    return ReviewedFinding(**item.model_dump(exclude={"origin", "scope", "symbol", "needs_context", "severity"}),
-        severity=severity, finding_id=finding_id(item.origin, item.rule_id, item.line_start, item.evidence),
+    return ReviewedFinding(**item.model_dump(exclude={"origin", "scope", "symbol", "needs_context", "severity", "column_start", "column_end"}),
+        severity=severity, finding_id=finding_id(item.origin, item.rule_id, item.line_start, item.evidence,
+            column_start=item.column_start, column_end=item.column_end,
+            symbol=item.symbol, explanation=item.explanation),
         origin=item.origin, status=status, review_note="固定静态规则发现",
         validation_hint=item.scope)
 
@@ -116,8 +138,7 @@ def reconcile(code: str, drafts: list[FindingDraft], static: list[StaticFinding]
     merged: dict[tuple[object, ...], ReviewedFinding] = {}
     for static_item in static:
         item = static_to_reviewed(static_item)
-        # Symbol and full diagnostic text preserve distinct same-line Ruff findings.
-        key = (item.origin, item.rule_id, item.line_start, static_item.symbol, static_item.explanation)
+        key = (item.finding_id,)
         merged[key] = item
         represented = any(candidate.origin == item.origin and candidate.rule_id == item.rule_id
                           and candidate.line_start <= item.line_end and candidate.line_end >= item.line_start
